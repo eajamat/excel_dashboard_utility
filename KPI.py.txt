@@ -1,0 +1,238 @@
+#Import all the required libraries
+import pandas as pd
+import openpyxl
+from openpyxl import load_workbook
+import datetime
+import os
+import numpy as np
+import xlsxwriter
+
+
+print("This utility takes excel file with single sheet only.")
+print("Please provide the path of the directory where files have been stored.")
+print("Output will be saved in the output directory created under same directory.")
+path = input("please provide the full path of the directory where input files are stored : ")
+
+input_path = path + "\\"
+output_path = input_path + "output\\"
+files_list = os.listdir(path)
+print("{} files exists in directory".format(files_list))
+if not(os.path.exists(output_path)):
+    os.mkdir(output_path)
+	
+	
+def read_file(file_name):
+	"""This function take the filename and read the files
+	this returns a data frame, level 0 column names and 
+	index for KPI"""
+	file = load_workbook(input_path + file_name)
+	sheet = file.active
+	value = sheet.values
+	col1 = next(value)
+	col2 = next(value)
+	df = pd.DataFrame(list(value))
+	df.columns = col2
+	df.set_index("Row Labels", inplace=True)
+	df =  df.loc[df.index.notnull(),  ]
+	kpi_index = [datetime.datetime.strftime(i, "%Y-%m-%d") for i in df.columns[4:]]
+	normal_index = list(df.columns[0:4])
+	final_index = normal_index + kpi_index
+	df.columns = final_index
+	#need to include condition if last index is 
+	df = df.iloc[:-2, :]
+	return df, col1, kpi_index
+	
+	
+
+def data_preparation(df, col1, kpi_index):
+	"""This function takes output of read_file() and 
+	returns KPI data frame and cell details data frame."""
+	level_0 = [i for i in col1 if i!=None]
+	number_of_days = len(kpi_index)/len(level_0)
+	count = 0
+	tuples = []
+	for j in df.columns[4:]:
+		if count < number_of_days:
+			tuples.append((level_0[0], j))
+			count += 1
+		elif count < 2*number_of_days:
+			tuples.append((level_0[1], j))
+			count += 1
+		elif count < 3*number_of_days:
+			tuples.append((level_0[2], j))
+			count += 1
+		elif count < 4*number_of_days:
+			tuples.append((level_0[3], j))
+			count += 1
+		elif count < 5*number_of_days:
+			tuples.append((level_0[4], j))
+			count += 1
+		else:
+			tuples.append((level_0[5], j))
+			count += 1
+
+	df_cell = df.iloc[:, :4]
+	df_kpi = df.iloc[:, 4:]
+	df_kpi.columns = pd.MultiIndex.from_tuples(tuples)
+	df_melt = df_kpi.reset_index().melt(id_vars = "Row Labels", var_name = ["KPI", "date"])
+	df_kpi_final = pd.pivot_table(df_melt, index=['Row Labels', 'date'], 
+								  columns='KPI', values='value', aggfunc='first').reset_index()
+	df_kpi_final.columns.name = None
+	df_kpi_final["date"] = pd.to_datetime(df_kpi_final["date"], format="%Y-%m-%d")
+	df_kpi_final["day_of_week"] = df_kpi_final["date"].dt.weekday
+	return df_kpi_final, df_cell
+	
+	
+#cleaning of cell data frame
+def clean_cell_df(df_cell):
+	"""This function assigns NaN values to invalid values in the dataframe.
+	This cleans the cell details data frame"""
+	df_cell.iloc[:, -2:] = df_cell.iloc[:, -2:].replace("#N/A", "1899-12-30 00:00:00")
+	df_cell.iloc[:, 0:2] = df_cell.iloc[:, 0:2].replace("#N/A", np.nan)
+	df_cell.iloc[:, -2] = pd.to_datetime(df_cell.iloc[:, -2], format="%Y-%m-%d")
+	df_cell.iloc[:, -1] = pd.to_datetime(df_cell.iloc[:, -1], format="%Y-%m-%d")
+	df_cell.reset_index(inplace = True)
+	return df_cell
+	
+	
+	
+#cleaning of KPI data frame
+def clean_kpi_df(df_kpi_final):
+	"""This function assigns NaN values to invalid values in the dataframe.
+	This cleans the KPI details data frame"""
+	df_kpi_final.replace("#DIV/0!", np.nan, inplace=True)
+	df_kpi_final.sort_values(by = ["Row Labels", "date"], inplace = True)
+	return df_kpi_final
+	
+	
+	
+def df_generation(file_name):
+	"""This function generate the final cummulative data frame to work on"""
+	df, col1, kpi_index = read_file(file_name)
+	print("file reading done")
+	df_kpi_final, df_cell = data_preparation(df, col1, kpi_index)
+	print("data preparation is done")
+	df_cell = clean_cell_df(df_cell)
+	df_kpi_final = clean_kpi_df(df_kpi_final)
+	print("data cleaning has been done")
+	final_data = pd.merge(df_cell, df_kpi_final, on = "Row Labels")
+	print("final data has been created")
+	return final_data
+
+	
+
+def saggerating_data(final_data):
+	"""This function saaggregates MS accepted cells and G900 done cells. 
+	date 1899-12-30 has been used as dummy to reperesent NA date."""
+	final_data.sort_values(by = ["Row Labels", "date"], inplace=True)
+	final_data.reset_index(inplace=True, drop=True)
+	g900_done = final_data[final_data["G900 Done Date"] != "1899-12-30"]
+	ms_accep_done = final_data[final_data["MS Acceptance Date"] != "1899-12-30"]
+	g900_cells = g900_done["Row Labels"].unique()
+	ms_accep_done_cells = ms_accep_done["Row Labels"].unique()
+	return g900_done, ms_accep_done, g900_cells, ms_accep_done_cells
+	
+	
+	
+def calculating_mean_g900(g900_done, cell_name):
+	"""This function calculates the average KPI for all the G900 done cells"""
+	cell_data = g900_done[g900_done["Row Labels"] == cell_name]
+	cell_data = cell_data[cell_data["date"] < cell_data["G900 Done Date"]]
+	cell_data.set_index(keys = ["Row Labels", "date"], inplace=True)
+	if cell_data.shape[0] == 0:
+		#print("No KPIs found for G900 dates for {}".format(cell_name))
+		return pd.DataFrame()
+	elif cell_data.shape[0] < 7:
+		cell_data = cell_data.iloc[-cell_data.shape[0]:, :]
+		cell_data = cell_data[cell_data["day_of_week"]<5]
+		cell_data_1 = cell_data.iloc[:, 4:10]
+	else:
+		cell_data = cell_data.iloc[-7:, :]
+		cell_data = cell_data[cell_data["day_of_week"]<5]
+		cell_data_1 = cell_data.iloc[:, 4:10]
+	cell_data_1["G900 Done Date"] = cell_data["G900 Done Date"]
+	cell_data_1.loc["Average"] = cell_data_1.mean()
+	return cell_data_1
+	
+	
+	
+def calculating_mean_ms_accept(ms_accep_done, cell_name):
+	"""This function calculates the average KPI for all the  MS accepted cells"""
+	cell_data = ms_accep_done[ms_accep_done["Row Labels"] == cell_name]
+	cell_data = cell_data[cell_data["date"] > cell_data["MS Acceptance Date"]]
+	cell_data.set_index(keys = ["Row Labels", "date"], inplace=True)
+	if cell_data.shape[0] == 0:
+		#print("No KPIs found for G900 dates for {}".format(g900_cells[0]))
+		return pd.DataFrame()
+	elif cell_data.shape[0] < 7:
+		cell_data = cell_data.iloc[:cell_data.shape[0], :]
+		cell_data = cell_data[cell_data["day_of_week"]<5]
+		cell_data_1 = cell_data.iloc[:, 4:10]
+	else:
+		cell_data = cell_data.iloc[: 7, :]
+		cell_data = cell_data[cell_data["day_of_week"]<5]
+		cell_data_1 = cell_data.iloc[:, 4:10]
+	cell_data_1["MS Acceptance Date"] = cell_data["MS Acceptance Date"]
+	cell_data_1.loc["Average"] = cell_data_1.mean()
+	#cell_data_1["MS Acceptance Date"] = cell_data["MS Acceptance Date"]
+	return cell_data_1
+	
+
+	
+def main_function():
+	"""This is the main function which will include whole processing pipeline."""
+	start_time = datetime.datetime.now()
+	
+	#read previous dinal_data here instead of initializing emtry DF.
+	final_data = pd.DataFrame()
+	for i in files_list:
+		print("file {} is under processing".format(i))
+		data = df_generation(i)
+		print(data.shape)
+		final_data = pd.concat([final_data, data])
+		print(final_data.shape)
+	print("all files have been processed")
+
+	print("saving the processed data")
+	final_data.sort_values(by = ["Row Labels", "date"], inplace=True)
+	final_data.reset_index(inplace=True, drop=True)
+	final_data.to_csv(output_path + "final_data.csv", header=0, index=None)
+
+	print("Starting to process KPIs")
+	g900_done, ms_accep_done, g900_cells, ms_accep_done_cells = saggerating_data(final_data)
+
+	print("Calculating KPIs for G900 done cells. Total cells are {}".format(len(g900_cells)))
+	g900_avg_kpi = pd.DataFrame()
+	for index, cell_name in enumerate(g900_cells):
+		cell_data = calculating_mean_g900(g900_done, cell_name)
+		g900_avg_kpi =  pd.concat([g900_avg_kpi, cell_data])
+		if index%500 == 0:
+			print("{} out of {} has been done".format(index, len(g900_cells)))
+	print("all G900 cells done")
+
+	print("Calculating KPIs for MS accepted cells. Total cells are {}".format(len(ms_accep_done_cells)))
+	ms_accept_avg_kpi = pd.DataFrame()
+	for index, cell_name in enumerate(ms_accep_done_cells):
+		cell_data = calculating_mean_ms_accept(ms_accep_done, cell_name)
+		ms_accept_avg_kpi =  pd.concat([ms_accept_avg_kpi, cell_data])
+		if index%500 == 0:
+			print("{} out of {} has been done".format(index, len(ms_accep_done_cells)))
+	print("all ms accepted cells done")
+
+
+	print("Saving the KPI values to output file")
+	kpi_sheet = pd.ExcelWriter(output_path + "KPI_sheet.xlsx", engine='xlsxwriter',\
+                           date_format="YYYY-MM-DD", datetime_format="YYYY-MM-DD")
+
+	g900_avg_kpi.to_excel(kpi_sheet, sheet_name="G900_KPI", )
+	ms_accept_avg_kpi.to_excel(kpi_sheet, sheet_name="MS_Accepted_KPI")
+	kpi_sheet.save()
+	kpi_sheet.close()
+
+	end_time = datetime.datetime.now()
+	total_time_taken = end_time - start_time
+	print("script has been completed")
+	print("Script has taken {} Hrs to process the data".format(total_time_taken))
+
+
+main_function()
